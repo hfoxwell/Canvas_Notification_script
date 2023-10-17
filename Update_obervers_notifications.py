@@ -1,5 +1,6 @@
 from canvasapi import Canvas
 from itertools import chain
+import threading
 import requests
 import json
 import time
@@ -51,6 +52,11 @@ def get_course_observer_ids(course):
 	
 	return course_observer_ids
 
+def send_to_canvas(user, desired_preference, channel, preference):
+    payload = { "notification_preferences": [ {"frequency": desired_preference} ] }
+    response = requests.put(API_URL + "api/v1/users/self/communication_channels/{}/notification_preferences/{}?as_user_id={}".format(channel.id, preference['notification'], user.id), headers = HEADERS, json = payload)
+    print(f'{"-":^10}{preference["notification"]:<45}{"=> " + desired_preference:>10} ( {"OK" if response.ok else f"FAILED - {response.status_code}"} )')
+   
 
 def update_user_notification_preferences(user, desired_preference):
 	channels = user.get_communication_channels()
@@ -69,11 +75,18 @@ def update_user_notification_preferences(user, desired_preference):
 			print("No Preferences to update.")
 			return
 		
+		threads = []
 		for preference in preferences:
-			payload = { "notification_preferences": [ {"frequency": desired_preference} ] }
-			response = requests.put(API_URL + "api/v1/users/self/communication_channels/{}/notification_preferences/{}?as_user_id={}".format(channel.id, preference['notification'], user.id), headers = HEADERS, json = payload)
-			print(f'{"-":^10}{preference["notification"]:<45}{"=> " + desired_preference:>10} ( {"OK" if response.ok else f"FAILED - {response.status_code}"} )')
+			thread = threading.Thread(target=send_to_canvas, args=(user, desired_preference, channel, preference))
+			threads.append(thread)
    
+		for thread in threads:
+			thread.start()
+   
+		for thread in threads:
+			thread.join()
+		
+		print("All updates sent.")
 
 try:
 	# Attempt access with entered credentials
