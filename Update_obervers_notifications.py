@@ -1,34 +1,35 @@
 import json  # Javascript Object Notation library for python
 import logging  # Logging tool for writing output to file
 import logging.handlers  # Logging handlers for stdout printing
+import os
 import sys  # Operating system endpoints
 import threading  # Multithreading tool for concurrent I/O operations
 import time  # Time library for measuring performance
 from itertools import chain  # Iteration tool for iterating complex lists
 
+import dotenv
 import requests  # Networking library for python
 from canvasapi import (
     Canvas,
-    account,
+    account,  # Canvas API Library for python
     course,
     exceptions,
-)  # Canvas API Library for python
+)
 
 #############################################################################################
 ## Configuration Options
 #############################################################################################
 
-# Read Configuration File
-with open("config.json", "r", encoding="UTF-8") as f:
-    config = json.load(f)
+# Load environment variables
+dotenv.load_dotenv()
 
 TERM_IDS = sys.argv[1].split(",")  # Read Term IDs from Command line input
-API_URL = f"{config['Test']['API_URL']}"  # Assign API URL from Configuration file
-API_KEY = config["Test"]["API_KEY"]  # Assign API KEY from Configuration file
+API_URL = os.getenv("CANVAS_URL")  # Assign API URL from Configuration file
+API_KEY = os.getenv("CANVAS_API_KEY")  # Assign API KEY from Configuration file
 
 HEADERS = {  # Headers to be included with each request
     "Content-type": "application/json",  # Data type to submit to Canvas
-    "Authorization": "Bearer " + API_KEY,  # Authorisation using API Key
+    "Authorization": f"Bearer {API_KEY}",  # Authorisation using API Key
 }
 
 TIMEOUT_SECONDS = {  # Timeouts for reading data in and out of a request
@@ -50,9 +51,36 @@ EXCLUDED_NOTIFICATIONS = (  # Notification categories to exclude
     "account_user_notification",
 )
 
-CANVAS_ACCOUNT = 1  # Canvas account for access level (DEFAULT => 1)
+CANVAS_ACCOUNT = os.getenv(
+    "CANVAS_ACCOUNT"
+)  # Canvas account for access level (DEFAULT => 1)
 
 LOG_LEVEL = logging.INFO  # Set the logging level for the terminal and the logfile
+
+#############################################################################################
+## Custom Exceptions
+#############################################################################################
+
+
+class ForbiddenResourceException(Exception):
+    pass
+
+
+class APIConnectionException(Exception):
+    pass
+
+
+class APIResourceUnavailableException(Exception):
+    pass
+
+
+class APITimeOutException(Exception):
+    pass
+
+
+class InvalidConfigurationException(Exception):
+    pass
+
 
 #############################################################################################
 # Configure the logger
@@ -74,6 +102,7 @@ rootLogger.addHandler(consoleHandler)
 #############################################################################################
 ## Functions
 #############################################################################################
+
 
 def connect_to_canvas(api_domain: str, api_key: str) -> Canvas:
     """
@@ -112,6 +141,16 @@ def get_account(canvas_connection: Canvas, account_number: int) -> account.Accou
     """
     Retrieves the main account from canvas for the script
     to use to access all courses for the given term.
+
+    Raises:
+        canvas_bad_request: _description_
+        invalid_token: _description_
+        unauthorized: _description_
+        forbidden: _description_
+        resource_nonexistant: _description_
+
+    Returns:
+        Account: Canvas user account
     """
     try:
         user_account: account.Account = canvas_connection.get_account(account_number)
@@ -248,16 +287,14 @@ def iterate_users(
         current_user += 1
 
         rootLogger.info(
-            f"{current_user}/{user_count} - {user.name} (ID: {user.id})\n"
-            + "-" * 60
+            f"{current_user}/{user_count} - {user.name} (ID: {user.id})\n" + "-" * 60
         )
 
         # For this user, update all their notification preferences
         update_user_notification_preferences(user, NOTIFICATION_OPTIONS[0])
 
         rootLogger.info(
-            f"User change time: {time.time() - start_time} seconds\n"
-            + "=" * 60
+            f"User change time: {time.time() - start_time} seconds\n" + "=" * 60
         )
 
 
@@ -274,39 +311,57 @@ def update_user_notification_preferences(user, desired_preference):
         rootLogger.info(f"{'-':^10} {channel}")
         # Get the notification preferences for a channel
 
-        response = requests.get(
-            f"{API_URL}api/v1/users/{user.id}/communication_channels/{channel.id}/notification_preferences",
-            headers=HEADERS,
-            timeout=(TIMEOUT_SECONDS["in"], TIMEOUT_SECONDS["out"]),
-        )
-
-        preferences = response.json()["notification_preferences"]
-        # Filter the preferences that don't match the desired_preference
-        preferences = [
-            pref
-            for pref in preferences
-            if pref["frequency"] != desired_preference
-            and not (pref["notification"] in EXCLUDED_NOTIFICATIONS)
-        ]
-
-        if not (len(preferences) > 0):
-            rootLogger.info(f"{'-':^10}{'No Preferences to update.':<45}")
-            return
-
-        for preference in preferences:
-            thread = threading.Thread(
-                target=send_to_canvas,
-                args=(user, desired_preference, channel, preference),
+        try:
+            response = requests.get(
+                f"{API_URL}api/v1/users/{user.id}/communication_channels/{channel.id}/notification_preferences",
+                headers=HEADERS,
+                timeout=(TIMEOUT_SECONDS["in"], TIMEOUT_SECONDS["out"]),
             )
-            threads.append(thread)
+        except exceptions.BadRequest as canvas_bad_request:
+            rootLogger.exception(
+                "Fatal Error connecting to canvas: %s", canvas_bad_request
+            )
+            raise canvas_bad_request
+        except exceptions.InvalidAccessToken as invalid_token:
+            rootLogger.exception("Supplied API key is not valid: %s.", invalid_token)
+            raise invalid_token
+        except exceptions.Unauthorized as unauthorized:
+            rootLogger.error("User is unauthorised: %s", unauthorized)
+        except exceptions.Forbidden as forbidden:
+            rootLogger.error(
+                "This user is forbidden from accessing this resource: %s", forbidden
+            )
+        except exceptions.ResourceDoesNotExist as resource_nonexistant:
+            rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
 
-        for thread in threads:
-            thread.start()
+        else:
+            preferences = response.json()["notification_preferences"]
+            # Filter the preferences that don't match the desired_preference
+            preferences = [
+                pref
+                for pref in preferences
+                if pref["frequency"] != desired_preference
+                and not (pref["notification"] in EXCLUDED_NOTIFICATIONS)
+            ]
 
-        for thread in threads:
-            thread.join()
+            if not (len(preferences) > 0):
+                rootLogger.info(f"{'-':^10}{'No Preferences to update.':<45}")
+                return
 
-        rootLogger.info("All updates sent.")
+            for preference in preferences:
+                thread = threading.Thread(
+                    target=send_to_canvas,
+                    args=(user, desired_preference, channel, preference),
+                )
+                threads.append(thread)
+
+            for thread in threads:
+                thread.start()
+
+            for thread in threads:
+                thread.join()
+
+            rootLogger.info("All updates sent.")
 
 
 def send_to_canvas(user, desired_preference, channel, preference):
@@ -314,12 +369,32 @@ def send_to_canvas(user, desired_preference, channel, preference):
     Sends the notification preference for a particular chanel to the Canvas server
     """
     payload = {"notification_preferences": [{"frequency": desired_preference}]}
-    response = requests.put(
-        f"{API_URL}api/v1/users/self/communication_channels/{channel.id}/notification_preferences/{preference['notification']}?as_user_id={user.id}",
-        headers=HEADERS,
-        json=payload,
-        timeout=(TIMEOUT_SECONDS["in"], TIMEOUT_SECONDS["out"]),
-    )
+
+    try:
+        response = requests.put(
+            f"{API_URL}api/v1/users/self/communication_channels/{channel.id}/notification_preferences/{preference['notification']}?as_user_id={user.id}",
+            headers=HEADERS,
+            json=payload,
+            timeout=(TIMEOUT_SECONDS["in"], TIMEOUT_SECONDS["out"]),
+        )
+    except exceptions.BadRequest as canvas_bad_request:
+        rootLogger.exception("Fatal Error connecting to canvas: %s", canvas_bad_request)
+        raise canvas_bad_request
+    except exceptions.InvalidAccessToken as invalid_token:
+        rootLogger.exception("Supplied API key is not valid: %s.", invalid_token)
+        raise invalid_token
+    except exceptions.Unauthorized as unauthorized:
+        rootLogger.exception("User is unauthorised: %s", unauthorized)
+        raise unauthorized
+    except exceptions.Forbidden as forbidden:
+        rootLogger.exception(
+            "This user is forbidden from accessing this resource: %s", forbidden
+        )
+        raise forbidden
+    except exceptions.ResourceDoesNotExist as resource_nonexistant:
+        rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
+        raise resource_nonexistant
+
     rootLogger.info(
         f'{"-":^10}{preference["notification"]:<45}{"=> " + desired_preference:>10} ( {"OK" if response.ok else f"FAILED - {response.status_code}"} )'
     )
@@ -329,13 +404,43 @@ def send_to_canvas(user, desired_preference, channel, preference):
 ## Main
 #############################################################################################
 
-if __name__ == "__main__":
+
+def main():
+    """Main function for the script, drives all other functions. 
+
+    Raises:
+        InvalidConfigurationException: 
+            Signals that the configuration of the .env file is incorrect
+    """
+
     # Variables
     program_start = time.time()
+    chosen_notification_option = os.getenv("NOTIFICATION_OPTION")
+    chosen_enrolment = os.getenv("ENROLMENT_OPTION")
+
+    # Validate correct configuration
+    if chosen_notification_option is None:
+        raise InvalidConfigurationException(
+            "No Notification has been chosen in the configuration file."
+        )
+    if chosen_enrolment is None:
+        raise InvalidConfigurationException(
+            "No user enrolment has been configured in the configuration file."
+        )
+    if API_KEY is None or API_URL is None:
+        raise InvalidConfigurationException(
+            "No API URL or API kEY specified, please check the configuration"
+        )
+    if CANVAS_ACCOUNT is None:
+        raise InvalidConfigurationException(
+            "No Canvas account chosen masquerading changes, check configuration."
+        )
+
+    # Output to user start of program
     rootLogger.info("Program start...")
 
     canvas_instance = connect_to_canvas(API_URL, API_KEY)
-    admin_account = get_account(canvas_instance, CANVAS_ACCOUNT)
+    admin_account = get_account(canvas_instance, int(CANVAS_ACCOUNT))
 
     # Print to user term information
     display_term_ids(TERM_IDS)
@@ -350,4 +455,10 @@ if __name__ == "__main__":
     iterate_users(canvas_instance, all_users, NOTIFICATION_OPTIONS[0])
 
     # Show end of program
-    rootLogger.info("Program completed, and took: %f seconds", program_start - time.time())
+    rootLogger.info(
+        "Program completed, and took: %f seconds", program_start - time.time()
+    )
+
+
+if __name__ == "__main__":
+    main()
