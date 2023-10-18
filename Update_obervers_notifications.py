@@ -1,139 +1,353 @@
-from canvasapi import Canvas
-from itertools import chain
-import threading
-import requests
-import json
-import time
-import sys
+import json  # Javascript Object Notation library for python
+import logging  # Logging tool for writing output to file
+import logging.handlers  # Logging handlers for stdout printing
+import sys  # Operating system endpoints
+import threading  # Multithreading tool for concurrent I/O operations
+import time  # Time library for measuring performance
+from itertools import chain  # Iteration tool for iterating complex lists
 
-# Read login credentials
-with open('config.json', 'r') as f:
-	config = json.load(f)
+import requests  # Networking library for python
+from canvasapi import (
+    Canvas,
+    account,
+    course,
+    exceptions,
+)  # Canvas API Library for python
 
-TERM_IDS = sys.argv[1].split(',')
-API_URL = f"{config['Test']['API_URL']}"
-API_KEY = config['Test']['API_KEY']
+#############################################################################################
+## Configuration Options
+#############################################################################################
 
-HEADERS = {
-	'Content-type': 'application/json',
-	'Authorization': 'Bearer ' + API_KEY
+# Read Configuration File
+with open("config.json", "r", encoding="UTF-8") as f:
+    config = json.load(f)
+
+TERM_IDS = sys.argv[1].split(",")  # Read Term IDs from Command line input
+API_URL = f"{config['Test']['API_URL']}"  # Assign API URL from Configuration file
+API_KEY = config["Test"]["API_KEY"]  # Assign API KEY from Configuration file
+
+HEADERS = {  # Headers to be included with each request
+    "Content-type": "application/json",  # Data type to submit to Canvas
+    "Authorization": "Bearer " + API_KEY,  # Authorisation using API Key
 }
 
-NOTIFICATION_OPTIONS = {
-	0 : "never",
-	1 : "immediately",
-	2 : "daily",
-	3 : "weekly"
+TIMEOUT_SECONDS = {  # Timeouts for reading data in and out of a request
+    "in": 5,
+    "out": 5,
 }
 
-ENROLLMENT_TYPES = {
-	0: "observer"
+NOTIFICATION_OPTIONS = {  # Canvas notification options
+    0: "never",  # NEVER notify
+    1: "immediately",  # IMMEDIATELY notify
+    2: "daily",  # DAILY summary notification
+    3: "weekly",  # WEEKLY summary notification
 }
 
-EXCLUDED_NOTIFICATIONS = (
-	"confirm_sms_communication_channel",
-	"account_user_notification"
+ENROLLMENT_TYPES = {0: "observer"}  # Canvas user types  # Observer type user
+
+EXCLUDED_NOTIFICATIONS = (  # Notification categories to exclude
+    "confirm_sms_communication_channel",
+    "account_user_notification",
 )
 
+CANVAS_ACCOUNT = 1  # Canvas account for access level (DEFAULT => 1)
 
-def get_courses_by_term_ids(account):
-	courses = list()
-	for term_id in TERM_IDS:
-		courses = list(chain(courses, account.get_courses(per_page=500, enrollment_term_id=term_id)))
-	return courses
+LOG_LEVEL = logging.INFO  # Set the logging level for the terminal and the logfile
+
+#############################################################################################
+# Configure the logger
+# ===================
+logFormatter = logging.Formatter(
+    "%(asctime)s [%(threadName)-12.12s] [%(levelname)-5.5s]  %(message)s"
+)
+rootLogger = logging.getLogger(__name__)
+rootLogger.setLevel(LOG_LEVEL)
+
+fileHandler = logging.FileHandler("logfile.log")
+fileHandler.setFormatter(logFormatter)
+rootLogger.addHandler(fileHandler)
+
+consoleHandler = logging.StreamHandler(sys.stdout)
+rootLogger.addHandler(consoleHandler)
+# ===================
+
+#############################################################################################
+## Functions
+#############################################################################################
+
+def connect_to_canvas(api_domain: str, api_key: str) -> Canvas:
+    """
+    Connects to canvas instance and returns an object which is able to
+    gather data about users and courses.
+    """
+
+    # Print action to console
+    rootLogger.info(f"Accessing: {api_domain}")
+    rootLogger.info(f"Using API key {api_key}...\n")
+
+    try:
+        canvas = Canvas(api_domain, api_key)
+    except exceptions.BadRequest as canvas_bad_request:
+        rootLogger.exception("Fatal Error connecting to canvas: %s", canvas_bad_request)
+        raise canvas_bad_request
+    except exceptions.InvalidAccessToken as invalid_token:
+        rootLogger.exception("Supplied API key is not valid: %s.", invalid_token)
+        raise invalid_token
+    except exceptions.Unauthorized as unauthorized:
+        rootLogger.exception("User is unauthorised: %s", unauthorized)
+        raise unauthorized
+    except exceptions.Forbidden as forbidden:
+        rootLogger.exception(
+            "This user is forbidden from accessing this resource: %s", forbidden
+        )
+        raise forbidden
+    except exceptions.ResourceDoesNotExist as resource_nonexistant:
+        rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
+        raise resource_nonexistant
+
+    return canvas
 
 
-def get_course_observer_ids(course):
-	course_observer_ids = list()
-	course_observers = course.get_users(enrollment_type=ENROLLMENT_TYPES[0])
+def get_account(canvas_connection: Canvas, account_number: int) -> account.Account:
+    """
+    Retrieves the main account from canvas for the script
+    to use to access all courses for the given term.
+    """
+    try:
+        user_account: account.Account = canvas_connection.get_account(account_number)
+    except exceptions.BadRequest as canvas_bad_request:
+        rootLogger.exception("Fatal Error connecting to canvas: %s", canvas_bad_request)
+        raise canvas_bad_request
+    except exceptions.InvalidAccessToken as invalid_token:
+        rootLogger.exception("Supplied API key is not valid: %s.", invalid_token)
+        raise invalid_token
+    except exceptions.Unauthorized as unauthorized:
+        rootLogger.exception("User is unauthorised: %s", unauthorized)
+        raise unauthorized
+    except exceptions.Forbidden as forbidden:
+        rootLogger.exception(
+            "This user is forbidden from accessing this resource: %s", forbidden
+        )
+        raise forbidden
+    except exceptions.ResourceDoesNotExist as resource_nonexistant:
+        rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
+        raise resource_nonexistant
 
-	for observer in course_observers:
-		course_observer_ids.append(observer.id)
-	
-	return course_observer_ids
+    return user_account
 
-def send_to_canvas(user, desired_preference, channel, preference):
-    payload = { "notification_preferences": [ {"frequency": desired_preference} ] }
-    response = requests.put(API_URL + "api/v1/users/self/communication_channels/{}/notification_preferences/{}?as_user_id={}".format(channel.id, preference['notification'], user.id), headers = HEADERS, json = payload)
-    print(f'{"-":^10}{preference["notification"]:<45}{"=> " + desired_preference:>10} ( {"OK" if response.ok else f"FAILED - {response.status_code}"} )')
-   
+
+def display_term_ids(TERM_IDS):
+    """
+    Documents the term id's which are being operated on.
+    """
+    rootLogger.info("Accessing Term IDs:")
+    for term_id in TERM_IDS:
+        rootLogger.info(f"{'-':^10}{term_id}\n")
+
+
+def get_courses_by_term_ids(canvas_account: account.Account):
+    """
+    Retrieves the courses in the given term, the courses which are accessed must be visible
+    from the account which has been set by CANVAS_ACCOUNT. This is most effectual when an
+    Admin account is used.
+    """
+
+    # Variables
+    course_list: list[course.Course] = list()
+
+    # Iterate over terms and retrieve a course
+    # Expand out the list of courses for each term and concatenate to
+    # the previous terms courses
+    for term_id in TERM_IDS:
+        course_list = list(
+            chain(
+                course_list,
+                canvas_account.get_courses(per_page=500, enrollment_term_id=term_id),
+            )
+        )
+    return course_list
+
+
+def get_user_ids(all_courses: list[course.Course], user_type: str) -> list[int]:
+    """
+    For each course, finds and retrieves the user ID for each of the chosen user type.
+    """
+
+    # Variables
+    all_user_ids = list()
+    start_time = time.time()
+
+    # Formatting for log file
+    rootLogger.info("Courses\n" + "=" * 60)
+
+    # Iterate over all courses, find users of nominated type
+    # add these users to a large list of users
+    for course in all_courses:
+        course_observer_ids = get_course_user_ids(course, user_type)
+        rootLogger.info(
+            f'{"-":^10}{course.name :<50} : {len(course_observer_ids) :>4} observers'
+        )
+        all_user_ids = all_user_ids + course_observer_ids
+
+    rootLogger.info(
+        f"Finished in: {time.asctime(time.localtime(time.time() - start_time)) :>20}"
+    )
+
+    return all_user_ids
+
+
+def get_course_user_ids(canvas_course: course.Course, enrolment_type: str):
+    """
+    For a course, retrieve all users of a particular user type. These user types are
+    defined in the ENROLMENT_TYPES.
+    """
+    course_user_ids = list()
+    users = canvas_course.get_users(enrollment_type=enrolment_type)
+
+    for user in users:
+        course_user_ids.append(user.id)
+
+    return course_user_ids
+
+
+def remove_duplicates(user_list) -> set[int]:
+    """
+    Removes duplicate user ids from the list of users
+    this is achieved by converting to set, which cannot have duplicates
+    """
+    return set(user_list)
+
+
+def iterate_users(
+    canvas_instance: Canvas, user_list: set[int], notification_setting: str
+):
+    """
+    Iterates over the list and updates each user's notification settings
+    """
+
+    # Variables
+    user_count = len(user_list)
+    current_user = 0
+
+    rootLogger.info(
+        "\n"
+        + "=" * 60
+        + f"\n Total: {len(user_list)} observers"
+        + "\n"
+        + "=" * 60
+        + "\n"
+    )
+
+    # Loop through all observers by ID
+    for user_id in user_list:
+        # Variables
+        start_time = time.time()
+        user = canvas_instance.get_user(user_id)
+
+        # Increment current user count
+        current_user += 1
+
+        rootLogger.info(
+            f"{current_user}/{user_count} - {user.name} (ID: {user.id})\n"
+            + "-" * 60
+        )
+
+        # For this user, update all their notification preferences
+        update_user_notification_preferences(user, NOTIFICATION_OPTIONS[0])
+
+        rootLogger.info(
+            f"User change time: {time.time() - start_time} seconds\n"
+            + "=" * 60
+        )
+
 
 def update_user_notification_preferences(user, desired_preference):
-	channels = user.get_communication_channels()
-	for channel in channels:
-		print(f"\n - {channel} \n")
-		
-		# Get the notification preferences for a channel
-		response = requests.get(
-			f"{API_URL}api/v1/users/{user.id}/communication_channels/{channel.id}/notification_preferences", headers = HEADERS
-		)
-		preferences = response.json()['notification_preferences']
-		# Filter the preferences that don't match the desired_preference
-		preferences = [pref for pref in preferences if pref['frequency'] != desired_preference and not(pref['notification'] in EXCLUDED_NOTIFICATIONS)]
-		
-		if not(len(preferences) > 0):
-			print("No Preferences to update.")
-			return
-		
-		threads = []
-		for preference in preferences:
-			thread = threading.Thread(target=send_to_canvas, args=(user, desired_preference, channel, preference))
-			threads.append(thread)
-   
-		for thread in threads:
-			thread.start()
-   
-		for thread in threads:
-			thread.join()
-		
-		print("All updates sent.")
+    """
+    For each user gathers the communication channels which they are subscribed to, then
+    updates their communication preferences with the selected communication preference.
+    These preferences are found in NOTIFICATION_OPTIONS
+    """
+    channels: user = user.get_communication_channels()
+    for channel in channels:
+        # Variables
+        threads: list[threading.Thread] = list()
+        rootLogger.info(f"{'-':^10} {channel}")
+        # Get the notification preferences for a channel
 
-try:
-	# Attempt access with entered credentials
-	print("\nAccessing {}".format(API_URL))
-	print("with API key {}...\n".format(API_KEY))
-	canvas = Canvas(API_URL, API_KEY)
-	account = canvas.get_account(1)
-except Exception as error:
-		print(error)
+        response = requests.get(
+            f"{API_URL}api/v1/users/{user.id}/communication_channels/{channel.id}/notification_preferences",
+            headers=HEADERS,
+            timeout=(TIMEOUT_SECONDS["in"], TIMEOUT_SECONDS["out"]),
+        )
 
-else:
-	
-	all_observer_ids = list()
-	print("Accessing Term IDs:")
-	for term_id in TERM_IDS:
-		print(f" - {term_id}\n")
+        preferences = response.json()["notification_preferences"]
+        # Filter the preferences that don't match the desired_preference
+        preferences = [
+            pref
+            for pref in preferences
+            if pref["frequency"] != desired_preference
+            and not (pref["notification"] in EXCLUDED_NOTIFICATIONS)
+        ]
 
-	
-	print("Courses\n" + "="*60)
-	
-	# Loop through all the courses
-	courses = get_courses_by_term_ids(account)
-	course_start_time = time.time()
-	for course in courses:
-		
-		course_observer_ids = get_course_observer_ids(course)
-		print(f'{"-":^10}{course.name :<50} : {len(course_observer_ids) :>4} observers')
-		all_observer_ids = all_observer_ids + course_observer_ids
-	print(f'Finished in: {time.asctime(time.localtime(time.time() - course_start_time)) :>20}')	
- 
-	# Remove duplicates/convert to set
-	all_observer_ids = set(all_observer_ids)
-	observers_num = len(all_observer_ids)
-	print("\n" + "="*60 + "\n Total: {} observers".format(observers_num) + "\n" + "="*60 + "\n")
-	
-	# Loop through all observers by ID
-	observer_count = 0
-	for id in all_observer_ids:
-		user_start_time = time.time()
-		user = canvas.get_user(id)
-		observer_count += 1
-		print()
-		print(f'{observer_count}/{observers_num} - {user.name} (ID: {user.id})\n')
-		print('-' * 60)
-		update_user_notification_preferences(user, NOTIFICATION_OPTIONS[0])
-		print()
-		print("User change time: {} seconds".format(time.time() - user_start_time))
-		# print("Total runtime: {} seconds".format(time_since(program_start_time)))
-		print()
-		print("="*60)
+        if not (len(preferences) > 0):
+            rootLogger.info(f"{'-':^10}{'No Preferences to update.':<45}")
+            return
+
+        for preference in preferences:
+            thread = threading.Thread(
+                target=send_to_canvas,
+                args=(user, desired_preference, channel, preference),
+            )
+            threads.append(thread)
+
+        for thread in threads:
+            thread.start()
+
+        for thread in threads:
+            thread.join()
+
+        rootLogger.info("All updates sent.")
+
+
+def send_to_canvas(user, desired_preference, channel, preference):
+    """
+    Sends the notification preference for a particular chanel to the Canvas server
+    """
+    payload = {"notification_preferences": [{"frequency": desired_preference}]}
+    response = requests.put(
+        f"{API_URL}api/v1/users/self/communication_channels/{channel.id}/notification_preferences/{preference['notification']}?as_user_id={user.id}",
+        headers=HEADERS,
+        json=payload,
+        timeout=(TIMEOUT_SECONDS["in"], TIMEOUT_SECONDS["out"]),
+    )
+    rootLogger.info(
+        f'{"-":^10}{preference["notification"]:<45}{"=> " + desired_preference:>10} ( {"OK" if response.ok else f"FAILED - {response.status_code}"} )'
+    )
+
+
+#############################################################################################
+## Main
+#############################################################################################
+
+if __name__ == "__main__":
+    # Variables
+    program_start = time.time()
+    rootLogger.info("Program start...")
+
+    canvas_instance = connect_to_canvas(API_URL, API_KEY)
+    admin_account = get_account(canvas_instance, CANVAS_ACCOUNT)
+
+    # Print to user term information
+    display_term_ids(TERM_IDS)
+
+    # Load Courses and retrieve users from those courses
+    # Remove duplicates from the list
+    courses_in_term = get_courses_by_term_ids(admin_account)
+    all_users = get_user_ids(courses_in_term, ENROLLMENT_TYPES[0])
+    all_users = remove_duplicates(all_users)
+
+    # Iterate over users and update their notification settings
+    iterate_users(canvas_instance, all_users, NOTIFICATION_OPTIONS[0])
+
+    # Show end of program
+    rootLogger.info("Program completed, and took: %f seconds", program_start - time.time())
