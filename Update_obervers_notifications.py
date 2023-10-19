@@ -1,19 +1,15 @@
+import concurrent.futures  # For creating threadpools for multithreading users
 import logging  # Logging tool for writing output to file
 import logging.handlers  # Logging handlers for stdout printing
 import os
 import sys  # Operating system endpoints
-import threading  # Multithreading tool for concurrent I/O operations
 import time  # Time library for measuring performance
 from itertools import chain  # Iteration tool for iterating complex lists
 
 import dotenv
 import requests  # Networking library for python
-from canvasapi import (
-    Canvas,
-    account,  # Canvas API Library for python
-    course,
-    exceptions,
-)
+from canvasapi import account  # Canvas API Library for python
+from canvasapi import Canvas, course, exceptions
 
 #############################################################################################
 ## Configuration Options
@@ -55,6 +51,8 @@ CANVAS_ACCOUNT = os.getenv(
 )  # Canvas account for access level (DEFAULT => 1)
 
 LOG_LEVEL = logging.INFO  # Set the logging level for the terminal and the logfile
+
+MAX_SUBMISSION_THREADS = 15
 
 #############################################################################################
 ## Custom Exceptions
@@ -276,40 +274,72 @@ def iterate_users(
         + "\n"
     )
 
-    # Loop through all observers by ID
-    for user_id in user_list:
-        # Variables
-        start_time = time.time()
-        user = canvas_instance.get_user(user_id)
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=MAX_SUBMISSION_THREADS
+    ) as executor:
+        futures = [
+            executor.submit(
+                submit_user_for_change, id, canvas_instance, notification_setting
+            )
+            for id in user_list
+        ]
 
-        # Increment current user count
-        current_user += 1
+    # Execute the futures which are being processed
+    concurrent.futures.wait(futures)
 
-        rootLogger.info(
-            f"{current_user}/{user_count} - {user.name} (ID: {user.id})\n" + "-" * 60
+
+def submit_user_for_change(
+    user_id: int, canvas_instance: Canvas, notification_setting: str
+):
+    """Function which prints information about current user,
+    then sends the user's account for the notification settings to be changed.
+
+    Args:
+        user_id (int): _description_
+    """
+    # Variables
+    start_time = time.time()
+    user = canvas_instance.get_user(user_id)
+    canvas_output: list[str] = []
+
+    canvas_output. append(
+        f"{'-':^10}{user.name} (ID: {user.id})"
+    )
+    canvas_output.append("-" * 60)
+
+    # For this user, update all their notification preferences
+    output = update_user_notification_preferences(user, notification_setting)
+
+    for text in output:
+        canvas_output.append(
+            text
         )
 
-        # For this user, update all their notification preferences
-        update_user_notification_preferences(user, notification_setting)
-
+    canvas_output.append(
+        f"User change time: {time.time() - start_time} seconds\n" + "=" * 60
+    )
+    
+    for output in canvas_output:
         rootLogger.info(
-            f"User change time: {time.time() - start_time} seconds\n" + "=" * 60
+            output
         )
 
 
-def update_user_notification_preferences(user, desired_preference):
+def update_user_notification_preferences(user, desired_preference) -> list[str]:
     """
     For each user gathers the communication channels which they are subscribed to, then
     updates their communication preferences with the selected communication preference.
     These preferences are found in NOTIFICATION_OPTIONS
     """
+
+    # Variables
+    text_output: list[str] = []
     channels: user = user.get_communication_channels()
     for channel in channels:
-        # Variables
-        threads: list[threading.Thread] = list()
-        rootLogger.info(f"{'-':^10} {channel}")
-        # Get the notification preferences for a channel
+        # Append output to output list
+        text_output.append(f"{'-':^10} {channel}")
 
+        # Get the notification preferences for a channel
         try:
             response = requests.get(
                 f"{API_URL}api/v1/users/{user.id}/communication_channels/{channel.id}/notification_preferences",
@@ -344,26 +374,34 @@ def update_user_notification_preferences(user, desired_preference):
             ]
 
             if not (len(preferences) > 0):
-                rootLogger.info(f"{'-':^10}{'No Preferences to update.':<45}")
-                return
+                text_output.append(f"{'-':^10}{'No Preferences to update.':<45}")
+                return text_output
 
-            for preference in preferences:
-                thread = threading.Thread(
-                    target=send_to_canvas,
-                    args=(user, desired_preference, channel, preference),
-                )
-                threads.append(thread)
+            # Create thread executor and create pool of execution threads
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=20
+            ) as submission_executor:
+                submission_futures = [
+                    submission_executor.submit(
+                        send_to_canvas, user, desired_preference, channel, preference
+                    )
+                    for preference in preferences
+                ]
+            
+            # Run all futures
+            concurrent.futures.wait(submission_futures)
+            
+            # Retrieve all results from threads
+            for future in submission_futures:
+                text_output.append(future.result())
 
-            for thread in threads:
-                thread.start()
-
-            for thread in threads:
-                thread.join()
-
-            rootLogger.info("All updates sent.")
+            text_output.append("All updates sent.")
+    
+    # Return all text outputs
+    return text_output
 
 
-def send_to_canvas(user, desired_preference, channel, preference):
+def send_to_canvas(user, desired_preference, channel, preference) -> str:
     """
     Sends the notification preference for a particular chanel to the Canvas server
     """
@@ -394,9 +432,7 @@ def send_to_canvas(user, desired_preference, channel, preference):
         rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
         raise resource_nonexistant
 
-    rootLogger.info(
-        f'{"-":^10}{preference["notification"]:<45}{"=> " + desired_preference:>10} ( {"OK" if response.ok else f"FAILED - {response.status_code}"} )'
-    )
+    return f'{"-":^10}{preference["notification"]:<45}{"=> " + desired_preference:>10} ( {"OK" if response.ok else f"FAILED - {response.status_code}"} )'
 
 
 #############################################################################################
@@ -405,10 +441,10 @@ def send_to_canvas(user, desired_preference, channel, preference):
 
 
 def main():
-    """Main function for the script, drives all other functions. 
+    """Main function for the script, drives all other functions.
 
     Raises:
-        InvalidConfigurationException: 
+        InvalidConfigurationException:
             Signals that the configuration of the .env file is incorrect
     """
 
@@ -455,7 +491,7 @@ def main():
 
     # Show end of program
     rootLogger.info(
-        "Program completed, and took: %f seconds", program_start - time.time()
+        "Program completed, and took: %f seconds", time.time() - program_start
     )
 
 
