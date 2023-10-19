@@ -1,4 +1,3 @@
-import json  # Javascript Object Notation library for python
 import logging  # Logging tool for writing output to file
 import logging.handlers  # Logging handlers for stdout printing
 import os
@@ -224,7 +223,7 @@ def get_user_ids(all_courses: list[course.Course], user_type: str) -> list[int]:
     for course in all_courses:
         course_observer_ids = get_course_user_ids(course, user_type)
         rootLogger.info(
-            f'{"-":^10}{course.name :<50} : {len(course_observer_ids) :>4} observers'
+            f'{"-":^10}{course.name :<50} : {len(course_observer_ids) :>5} {user_type}'
         )
         all_user_ids = all_user_ids + course_observer_ids
 
