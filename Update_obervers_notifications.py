@@ -290,7 +290,7 @@ def iterate_users(
         )
 
         # For this user, update all their notification preferences
-        update_user_notification_preferences(user, NOTIFICATION_OPTIONS[0])
+        update_user_notification_preferences(user, notification_setting[0])
 
         rootLogger.info(
             f"User change time: {time.time() - start_time} seconds\n" + "=" * 60
