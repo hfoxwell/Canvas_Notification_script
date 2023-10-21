@@ -1,12 +1,13 @@
-import concurrent.futures  # For creating threadpools for multithreading users
+import concurrent.futures  # For creating threadpool for multithreading users
 import logging  # Logging tool for writing output to file
 import logging.handlers  # Logging handlers for stdout printing
+import threading
 import os
 import sys  # Operating system endpoints
 import time  # Time library for measuring performance
 from itertools import chain  # Iteration tool for iterating complex lists
 
-import dotenv
+from dotenv import load_dotenv
 import requests  # Networking library for python
 from canvasapi import account  # Canvas API Library for python
 from canvasapi import Canvas, course, exceptions
@@ -16,11 +17,12 @@ from canvasapi import Canvas, course, exceptions
 #############################################################################################
 
 # Load environment variables
-dotenv.load_dotenv()
+env_file_path = os.path.join(os.getcwd(), '.env')
+load_dotenv(dotenv_path=env_file_path)
 
 TERM_IDS = sys.argv[1].split(",")  # Read Term IDs from Command line input
-API_URL = os.getenv("CANVAS_URL")  # Assign API URL from Configuration file
-API_KEY = os.getenv("CANVAS_API_KEY")  # Assign API KEY from Configuration file
+API_URL = os.environ.get("CANVAS_URL")  # Assign API URL from Configuration file
+API_KEY = os.environ.get("CANVAS_API_KEY")  # Assign API KEY from Configuration file
 
 HEADERS = {  # Headers to be included with each request
     "Content-type": "application/json",  # Data type to submit to Canvas
@@ -52,7 +54,8 @@ CANVAS_ACCOUNT = os.getenv(
 
 LOG_LEVEL = logging.INFO  # Set the logging level for the terminal and the logfile
 
-MAX_SUBMISSION_THREADS = 15
+MAX_THREADS = 20  # Number of threads to use in multithreading
+FILE_LOCK = threading.Lock()  # Locks the log file for writing
 
 #############################################################################################
 ## Custom Exceptions
@@ -216,14 +219,20 @@ def get_user_ids(all_courses: list[course.Course], user_type: str) -> list[int]:
     # Formatting for log file
     rootLogger.info("Courses\n" + "=" * 60)
 
+    def threaded_courses(chosen_course) -> list[int]:
+        course_observer_ids = get_course_user_ids(chosen_course, user_type)
+        rootLogger.info(
+            f'{"-":^10}{chosen_course.name :<50} : {len(course_observer_ids) :>5} {user_type}'
+        )
+        return course_observer_ids
+
     # Iterate over all courses, find users of nominated type
     # add these users to a large list of users
-    for course in all_courses:
-        course_observer_ids = get_course_user_ids(course, user_type)
-        rootLogger.info(
-            f'{"-":^10}{course.name :<50} : {len(course_observer_ids) :>5} {user_type}'
-        )
-        all_user_ids = all_user_ids + course_observer_ids
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        results = executor.map(threaded_courses, all_courses)
+        
+    for result in results:
+        all_user_ids = result + all_user_ids
 
     rootLogger.info(
         f"Finished in: {time.asctime(time.localtime(time.time() - start_time)) :>20}"
@@ -275,7 +284,7 @@ def iterate_users(
     )
 
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=MAX_SUBMISSION_THREADS
+        max_workers=MAX_THREADS
     ) as executor:
         futures = [
             executor.submit(
@@ -284,8 +293,8 @@ def iterate_users(
             for id in user_list
         ]
 
-    # Execute the futures which are being processed
-    concurrent.futures.wait(futures)
+        # Execute the futures which are being processed
+        concurrent.futures.wait(futures)
 
 
 def submit_user_for_change(
@@ -320,9 +329,10 @@ def submit_user_for_change(
     )
     
     for output in canvas_output:
-        rootLogger.info(
-            output
-        )
+        with FILE_LOCK:
+            rootLogger.info(
+                output
+            )
 
 
 def update_user_notification_preferences(user, desired_preference) -> list[str]:
@@ -379,7 +389,7 @@ def update_user_notification_preferences(user, desired_preference) -> list[str]:
 
             # Create thread executor and create pool of execution threads
             with concurrent.futures.ThreadPoolExecutor(
-                max_workers=20
+                max_workers=len(preferences)
             ) as submission_executor:
                 submission_futures = [
                     submission_executor.submit(
@@ -388,8 +398,8 @@ def update_user_notification_preferences(user, desired_preference) -> list[str]:
                     for preference in preferences
                 ]
             
-            # Run all futures
-            concurrent.futures.wait(submission_futures)
+                # Run all futures
+                concurrent.futures.wait(submission_futures)
             
             # Retrieve all results from threads
             for future in submission_futures:
@@ -452,6 +462,7 @@ def main():
     program_start = time.time()
     chosen_notification_option = os.getenv("NOTIFICATION_OPTION")
     chosen_enrolment = os.getenv("ENROLMENT_OPTION")
+    print(os.getenv("API_URL"))
 
     # Validate correct configuration
     if chosen_notification_option is None:
@@ -483,11 +494,11 @@ def main():
     # Load Courses and retrieve users from those courses
     # Remove duplicates from the list
     courses_in_term = get_courses_by_term_ids(admin_account)
-    all_users = get_user_ids(courses_in_term, ENROLLMENT_TYPES[0])
+    all_users = get_user_ids(courses_in_term, ENROLLMENT_TYPES[int(chosen_enrolment)])
     all_users = remove_duplicates(all_users)
 
     # Iterate over users and update their notification settings
-    iterate_users(canvas_instance, all_users, NOTIFICATION_OPTIONS[0])
+    iterate_users(canvas_instance, all_users, NOTIFICATION_OPTIONS[int(chosen_notification_option)])
 
     # Show end of program
     rootLogger.info(
