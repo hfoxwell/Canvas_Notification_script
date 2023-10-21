@@ -8,12 +8,8 @@ from itertools import chain  # Iteration tool for iterating complex lists
 
 import dotenv
 import requests  # Networking library for python
-from canvasapi import (
-    Canvas,
-    account,  # Canvas API Library for python
-    course,
-    exceptions,
-)
+from canvasapi import account  # Canvas API Library for python
+from canvasapi import Canvas, course, exceptions, user
 
 #############################################################################################
 ## Configuration Options
@@ -74,11 +70,15 @@ class APIResourceUnavailableException(Exception):
 
 
 class APITimeOutException(Exception):
-    pass
+    """API has timed out"""
 
 
 class InvalidConfigurationException(Exception):
-    pass
+    """Invalid configuration for canvas"""
+
+
+class CanvasAccountException(Exception):
+    """An error retrieving the Nominated account"""
 
 
 #############################################################################################
@@ -115,24 +115,14 @@ def connect_to_canvas(api_domain: str, api_key: str) -> Canvas:
 
     try:
         canvas = Canvas(api_domain, api_key)
-    except exceptions.BadRequest as canvas_bad_request:
-        rootLogger.exception("Fatal Error connecting to canvas: %s", canvas_bad_request)
-        raise canvas_bad_request
-    except exceptions.InvalidAccessToken as invalid_token:
-        rootLogger.exception("Supplied API key is not valid: %s.", invalid_token)
-        raise invalid_token
-    except exceptions.Unauthorized as unauthorized:
-        rootLogger.exception("User is unauthorised: %s", unauthorized)
-        raise unauthorized
-    except exceptions.Forbidden as forbidden:
+    except (exceptions.CanvasException, Warning) as canvas_exception:
+        rootLogger.exception("Fatal Error creating Canvas connection.")
+        rootLogger.exception(canvas_exception)
+        rootLogger.exception("Ensure that your API key is valid")
         rootLogger.exception(
-            "This user is forbidden from accessing this resource: %s", forbidden
+            "Ensure that your api reference does not contain 'api/v1/'"
         )
-        raise forbidden
-    except exceptions.ResourceDoesNotExist as resource_nonexistant:
-        rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
-        raise resource_nonexistant
-
+        exit()
     return canvas
 
 
@@ -153,23 +143,17 @@ def get_account(canvas_connection: Canvas, account_number: int) -> account.Accou
     """
     try:
         user_account: account.Account = canvas_connection.get_account(account_number)
-    except exceptions.BadRequest as canvas_bad_request:
-        rootLogger.exception("Fatal Error connecting to canvas: %s", canvas_bad_request)
-        raise canvas_bad_request
-    except exceptions.InvalidAccessToken as invalid_token:
-        rootLogger.exception("Supplied API key is not valid: %s.", invalid_token)
-        raise invalid_token
-    except exceptions.Unauthorized as unauthorized:
-        rootLogger.exception("User is unauthorised: %s", unauthorized)
-        raise unauthorized
-    except exceptions.Forbidden as forbidden:
+    except (
+        exceptions.BadRequest,
+        exceptions.Unauthorized,
+        exceptions.Forbidden,
+        exceptions.ResourceDoesNotExist,
+        exceptions.UnprocessableEntity,
+    ) as canvas_exception:
         rootLogger.exception(
-            "This user is forbidden from accessing this resource: %s", forbidden
+            "There was an error retrieving user account: %s", canvas_exception
         )
-        raise forbidden
-    except exceptions.ResourceDoesNotExist as resource_nonexistant:
-        rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
-        raise resource_nonexistant
+        raise
 
     return user_account
 
@@ -297,13 +281,13 @@ def iterate_users(
         )
 
 
-def update_user_notification_preferences(user, desired_preference):
+def update_user_notification_preferences(user: user.User, desired_preference):
     """
     For each user gathers the communication channels which they are subscribed to, then
     updates their communication preferences with the selected communication preference.
     These preferences are found in NOTIFICATION_OPTIONS
     """
-    channels: user = user.get_communication_channels()
+    channels = user.get_communication_channels()
     for channel in channels:
         # Variables
         threads: list[threading.Thread] = list()
@@ -316,22 +300,17 @@ def update_user_notification_preferences(user, desired_preference):
                 headers=HEADERS,
                 timeout=(TIMEOUT_SECONDS["in"], TIMEOUT_SECONDS["out"]),
             )
-        except exceptions.BadRequest as canvas_bad_request:
-            rootLogger.exception(
-                "Fatal Error connecting to canvas: %s", canvas_bad_request
-            )
-            raise canvas_bad_request
-        except exceptions.InvalidAccessToken as invalid_token:
-            rootLogger.exception("Supplied API key is not valid: %s.", invalid_token)
-            raise invalid_token
-        except exceptions.Unauthorized as unauthorized:
-            rootLogger.error("User is unauthorised: %s", unauthorized)
-        except exceptions.Forbidden as forbidden:
+        except (
+            requests.exceptions.Timeout,  # Request times out
+            requests.exceptions.ProxyError,  # Proxy settings preventing channel aquisition
+            requests.exceptions.HTTPError,  # Http error occured during channel aquisition
+        ) as user_channel_error:
             rootLogger.error(
-                "This user is forbidden from accessing this resource: %s", forbidden
+                "An error occured retrieving notification preferences for:%s's - %s channel.",
+                user.name,
+                channel,
             )
-        except exceptions.ResourceDoesNotExist as resource_nonexistant:
-            rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
+            rootLogger.exception(user_channel_error)
 
         else:
             preferences = response.json()["notification_preferences"]
@@ -363,7 +342,7 @@ def update_user_notification_preferences(user, desired_preference):
             rootLogger.info("All updates sent.")
 
 
-def send_to_canvas(user, desired_preference, channel, preference):
+def send_to_canvas(user: user.User, desired_preference, channel, preference):
     """
     Sends the notification preference for a particular chanel to the Canvas server
     """
@@ -376,23 +355,16 @@ def send_to_canvas(user, desired_preference, channel, preference):
             json=payload,
             timeout=(TIMEOUT_SECONDS["in"], TIMEOUT_SECONDS["out"]),
         )
-    except exceptions.BadRequest as canvas_bad_request:
-        rootLogger.exception("Fatal Error connecting to canvas: %s", canvas_bad_request)
-        raise canvas_bad_request
-    except exceptions.InvalidAccessToken as invalid_token:
-        rootLogger.exception("Supplied API key is not valid: %s.", invalid_token)
-        raise invalid_token
-    except exceptions.Unauthorized as unauthorized:
-        rootLogger.exception("User is unauthorised: %s", unauthorized)
-        raise unauthorized
-    except exceptions.Forbidden as forbidden:
+    except (
+        requests.exceptions.Timeout,  # Request times out
+        requests.exceptions.ProxyError,  # Proxy settings preventing channel aquisition
+        requests.exceptions.ConnectionError,  # Connection is lost
+    ) as update_settings_error:
         rootLogger.exception(
-            "This user is forbidden from accessing this resource: %s", forbidden
+            "An error occured with the requests module preventing settings update"
         )
-        raise forbidden
-    except exceptions.ResourceDoesNotExist as resource_nonexistant:
-        rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
-        raise resource_nonexistant
+        rootLogger.exception(update_settings_error)
+        return
 
     rootLogger.info(
         f'{"-":^10}{preference["notification"]:<45}{"=> " + desired_preference:>10} ( {"OK" if response.ok else f"FAILED - {response.status_code}"} )'
@@ -405,10 +377,10 @@ def send_to_canvas(user, desired_preference, channel, preference):
 
 
 def main():
-    """Main function for the script, drives all other functions. 
+    """Main function for the script, drives all other functions.
 
     Raises:
-        InvalidConfigurationException: 
+        InvalidConfigurationException:
             Signals that the configuration of the .env file is incorrect
     """
 
