@@ -56,28 +56,30 @@ LOG_LEVEL = logging.INFO  # Set the logging level for the terminal and the logfi
 ## Custom Exceptions
 #############################################################################################
 
+class BaseNotifierException(Exception):
+    """Base exception for the script"""
 
-class ForbiddenResourceException(Exception):
-    pass
-
-
-class APIConnectionException(Exception):
-    pass
+class ForbiddenResourceException(BaseNotifierException):
+    """Forbidden to access the provided resource"""
 
 
-class APIResourceUnavailableException(Exception):
-    pass
+class APIConnectionException(BaseNotifierException):
+    """Cannot connect to the API"""
 
 
-class APITimeOutException(Exception):
+class APIResourceUnavailableException(BaseNotifierException):
+    """The resource requested through the API is not available"""
+
+
+class APITimeOutException(BaseNotifierException):
     """API has timed out"""
 
 
-class InvalidConfigurationException(Exception):
+class InvalidConfigurationException(BaseNotifierException):
     """Invalid configuration for canvas"""
 
 
-class CanvasAccountException(Exception):
+class CanvasAccountException(BaseNotifierException):
     """An error retrieving the Nominated account"""
 
 
