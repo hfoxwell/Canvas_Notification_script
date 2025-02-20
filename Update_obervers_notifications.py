@@ -1,26 +1,28 @@
+import concurrent.futures  # For creating threadpool for multithreading users
 import logging  # Logging tool for writing output to file
 import logging.handlers  # Logging handlers for stdout printing
+import threading
 import os
 import sys  # Operating system endpoints
-import threading  # Multithreading tool for concurrent I/O operations
 import time  # Time library for measuring performance
 from itertools import chain  # Iteration tool for iterating complex lists
 
-import dotenv
+from dotenv import load_dotenv
 import requests  # Networking library for python
 from canvasapi import account  # Canvas API Library for python
-from canvasapi import Canvas, course, exceptions, user
+from canvasapi import Canvas, course, exceptions
 
 #############################################################################################
 ## Configuration Options
 #############################################################################################
 
 # Load environment variables
-dotenv.load_dotenv()
+env_file_path = os.path.join(os.getcwd(), '.env')
+load_dotenv(dotenv_path=env_file_path)
 
 TERM_IDS = sys.argv[1].split(",")  # Read Term IDs from Command line input
-API_URL = os.getenv("CANVAS_URL")  # Assign API URL from Configuration file
-API_KEY = os.getenv("CANVAS_API_KEY")  # Assign API KEY from Configuration file
+API_URL = os.environ.get("CANVAS_URL")  # Assign API URL from Configuration file
+API_KEY = os.environ.get("CANVAS_API_KEY")  # Assign API KEY from Configuration file
 
 HEADERS = {  # Headers to be included with each request
     "Content-type": "application/json",  # Data type to submit to Canvas
@@ -51,6 +53,9 @@ CANVAS_ACCOUNT = os.getenv(
 )  # Canvas account for access level (DEFAULT => 1)
 
 LOG_LEVEL = logging.INFO  # Set the logging level for the terminal and the logfile
+
+MAX_THREADS = 20  # Number of threads to use in multithreading
+FILE_LOCK = threading.Lock()  # Locks the log file for writing
 
 #############################################################################################
 ## Custom Exceptions
@@ -204,14 +209,20 @@ def get_user_ids(all_courses: list[course.Course], user_type: str) -> list[int]:
     # Formatting for log file
     rootLogger.info("Courses\n" + "=" * 60)
 
+    def threaded_courses(chosen_course) -> list[int]:
+        course_observer_ids = get_course_user_ids(chosen_course, user_type)
+        rootLogger.info(
+            f'{"-":^10}{chosen_course.name :<50} : {len(course_observer_ids) :>5} {user_type}'
+        )
+        return course_observer_ids
+
     # Iterate over all courses, find users of nominated type
     # add these users to a large list of users
-    for course in all_courses:
-        course_observer_ids = get_course_user_ids(course, user_type)
-        rootLogger.info(
-            f'{"-":^10}{course.name :<50} : {len(course_observer_ids) :>5} {user_type}'
-        )
-        all_user_ids = all_user_ids + course_observer_ids
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        results = executor.map(threaded_courses, all_courses)
+        
+    for result in results:
+        all_user_ids = result + all_user_ids
 
     rootLogger.info(
         f"Finished in: {time.asctime(time.localtime(time.time() - start_time)) :>20}"
@@ -262,40 +273,75 @@ def iterate_users(
         + "\n"
     )
 
-    # Loop through all observers by ID
-    for user_id in user_list:
-        # Variables
-        start_time = time.time()
-        user = canvas_instance.get_user(user_id)
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=MAX_THREADS
+    ) as executor:
+        futures = [
+            executor.submit(
+                submit_user_for_change, id, canvas_instance, notification_setting
+            )
+            for id in user_list
+        ]
 
-        # Increment current user count
-        current_user += 1
+        # Execute the futures which are being processed
+        concurrent.futures.wait(futures)
 
-        rootLogger.info(
-            f"{current_user}/{user_count} - {user.name} (ID: {user.id})\n" + "-" * 60
+
+def submit_user_for_change(
+    user_id: int, canvas_instance: Canvas, notification_setting: str
+):
+    """Function which prints information about current user,
+    then sends the user's account for the notification settings to be changed.
+
+    Args:
+        user_id (int): _description_
+    """
+    # Variables
+    start_time = time.time()
+    user = canvas_instance.get_user(user_id)
+    canvas_output: list[str] = []
+
+    canvas_output. append(
+        f"{'-':^10}{user.name} (ID: {user.id})"
+    )
+    canvas_output.append("-" * 60)
+
+    # For this user, update all their notification preferences
+    output = update_user_notification_preferences(user, notification_setting)
+
+    for text in output:
+        canvas_output.append(
+            text
         )
 
-        # For this user, update all their notification preferences
-        update_user_notification_preferences(user, notification_setting)
+    canvas_output.append(
+        f"User change time: {time.time() - start_time} seconds\n" + "=" * 60
+    )
+    
+    for output in canvas_output:
+        with FILE_LOCK:
+            rootLogger.info(
+                output
+            )
 
-        rootLogger.info(
-            f"User change time: {time.time() - start_time} seconds\n" + "=" * 60
-        )
 
 
-def update_user_notification_preferences(user: user.User, desired_preference):
+def update_user_notification_preferences(user, desired_preference) -> list[str]:
     """
     For each user gathers the communication channels which they are subscribed to, then
     updates their communication preferences with the selected communication preference.
     These preferences are found in NOTIFICATION_OPTIONS
     """
-    channels = user.get_communication_channels()
-    for channel in channels:
-        # Variables
-        threads: list[threading.Thread] = list()
-        rootLogger.info(f"{'-':^10} {channel}")
-        # Get the notification preferences for a channel
 
+    # Variables
+    text_output: list[str] = []
+    channels: user = user.get_communication_channels()
+      
+    for channel in channels:
+        # Append output to output list
+        text_output.append(f"{'-':^10} {channel}")
+
+        # Get the notification preferences for a channel
         try:
             response = requests.get(
                 f"{API_URL}api/v1/users/{user.id}/communication_channels/{channel.id}/notification_preferences",
@@ -325,26 +371,34 @@ def update_user_notification_preferences(user: user.User, desired_preference):
             ]
 
             if not (len(preferences) > 0):
-                rootLogger.info(f"{'-':^10}{'No Preferences to update.':<45}")
-                return
+                text_output.append(f"{'-':^10}{'No Preferences to update.':<45}")
+                return text_output
 
-            for preference in preferences:
-                thread = threading.Thread(
-                    target=send_to_canvas,
-                    args=(user, desired_preference, channel, preference),
-                )
-                threads.append(thread)
+            # Create thread executor and create pool of execution threads
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(preferences)
+            ) as submission_executor:
+                submission_futures = [
+                    submission_executor.submit(
+                        send_to_canvas, user, desired_preference, channel, preference
+                    )
+                    for preference in preferences
+                ]
+            
+                # Run all futures
+                concurrent.futures.wait(submission_futures)
+            
+            # Retrieve all results from threads
+            for future in submission_futures:
+                text_output.append(future.result())
 
-            for thread in threads:
-                thread.start()
-
-            for thread in threads:
-                thread.join()
-
-            rootLogger.info("All updates sent.")
+            text_output.append("All updates sent.")
+    
+    # Return all text outputs
+    return text_output
 
 
-def send_to_canvas(user: user.User, desired_preference, channel, preference):
+def send_to_canvas(user, desired_preference, channel, preference) -> str:
     """
     Sends the notification preference for a particular chanel to the Canvas server
     """
@@ -368,9 +422,7 @@ def send_to_canvas(user: user.User, desired_preference, channel, preference):
         rootLogger.exception(update_settings_error)
         return
 
-    rootLogger.info(
-        f'{"-":^10}{preference["notification"]:<45}{"=> " + desired_preference:>10} ( {"OK" if response.ok else f"FAILED - {response.status_code}"} )'
-    )
+    return f'{"-":^10}{preference["notification"]:<45}{"=> " + desired_preference:>10} ( {"OK" if response.ok else f"FAILED - {response.status_code}"} )'
 
 
 #############################################################################################
@@ -390,6 +442,7 @@ def main():
     program_start = time.time()
     chosen_notification_option = os.getenv("NOTIFICATION_OPTION")
     chosen_enrolment = os.getenv("ENROLMENT_OPTION")
+    print(os.getenv("API_URL"))
 
     # Validate correct configuration
     if chosen_notification_option is None:
@@ -421,15 +474,15 @@ def main():
     # Load Courses and retrieve users from those courses
     # Remove duplicates from the list
     courses_in_term = get_courses_by_term_ids(admin_account)
-    all_users = get_user_ids(courses_in_term, ENROLLMENT_TYPES[0])
+    all_users = get_user_ids(courses_in_term, ENROLLMENT_TYPES[int(chosen_enrolment)])
     all_users = remove_duplicates(all_users)
 
     # Iterate over users and update their notification settings
-    iterate_users(canvas_instance, all_users, NOTIFICATION_OPTIONS[0])
+    iterate_users(canvas_instance, all_users, NOTIFICATION_OPTIONS[int(chosen_notification_option)])
 
     # Show end of program
     rootLogger.info(
-        "Program completed, and took: %f seconds", program_start - time.time()
+        "Program completed, and took: %f seconds", time.time() - program_start
     )
 
 
