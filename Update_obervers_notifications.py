@@ -61,25 +61,31 @@ FILE_LOCK = threading.Lock()  # Locks the log file for writing
 ## Custom Exceptions
 #############################################################################################
 
+class BaseNotifierException(Exception):
+    """Base exception for the script"""
 
-class ForbiddenResourceException(Exception):
-    pass
-
-
-class APIConnectionException(Exception):
-    pass
+class ForbiddenResourceException(BaseNotifierException):
+    """Forbidden to access the provided resource"""
 
 
-class APIResourceUnavailableException(Exception):
-    pass
+class APIConnectionException(BaseNotifierException):
+    """Cannot connect to the API"""
 
 
-class APITimeOutException(Exception):
-    pass
+class APIResourceUnavailableException(BaseNotifierException):
+    """The resource requested through the API is not available"""
 
 
-class InvalidConfigurationException(Exception):
-    pass
+class APITimeOutException(BaseNotifierException):
+    """API has timed out"""
+
+
+class InvalidConfigurationException(BaseNotifierException):
+    """Invalid configuration for canvas"""
+
+
+class CanvasAccountException(BaseNotifierException):
+    """An error retrieving the Nominated account"""
 
 
 #############################################################################################
@@ -116,24 +122,14 @@ def connect_to_canvas(api_domain: str, api_key: str) -> Canvas:
 
     try:
         canvas = Canvas(api_domain, api_key)
-    except exceptions.BadRequest as canvas_bad_request:
-        rootLogger.exception("Fatal Error connecting to canvas: %s", canvas_bad_request)
-        raise canvas_bad_request
-    except exceptions.InvalidAccessToken as invalid_token:
-        rootLogger.exception("Supplied API key is not valid: %s.", invalid_token)
-        raise invalid_token
-    except exceptions.Unauthorized as unauthorized:
-        rootLogger.exception("User is unauthorised: %s", unauthorized)
-        raise unauthorized
-    except exceptions.Forbidden as forbidden:
+    except (exceptions.CanvasException, Warning) as canvas_exception:
+        rootLogger.exception("Fatal Error creating Canvas connection.")
+        rootLogger.exception(canvas_exception)
+        rootLogger.exception("Ensure that your API key is valid")
         rootLogger.exception(
-            "This user is forbidden from accessing this resource: %s", forbidden
+            "Ensure that your api reference does not contain 'api/v1/'"
         )
-        raise forbidden
-    except exceptions.ResourceDoesNotExist as resource_nonexistant:
-        rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
-        raise resource_nonexistant
-
+        exit()
     return canvas
 
 
@@ -154,23 +150,17 @@ def get_account(canvas_connection: Canvas, account_number: int) -> account.Accou
     """
     try:
         user_account: account.Account = canvas_connection.get_account(account_number)
-    except exceptions.BadRequest as canvas_bad_request:
-        rootLogger.exception("Fatal Error connecting to canvas: %s", canvas_bad_request)
-        raise canvas_bad_request
-    except exceptions.InvalidAccessToken as invalid_token:
-        rootLogger.exception("Supplied API key is not valid: %s.", invalid_token)
-        raise invalid_token
-    except exceptions.Unauthorized as unauthorized:
-        rootLogger.exception("User is unauthorised: %s", unauthorized)
-        raise unauthorized
-    except exceptions.Forbidden as forbidden:
+    except (
+        exceptions.BadRequest,
+        exceptions.Unauthorized,
+        exceptions.Forbidden,
+        exceptions.ResourceDoesNotExist,
+        exceptions.UnprocessableEntity,
+    ) as canvas_exception:
         rootLogger.exception(
-            "This user is forbidden from accessing this resource: %s", forbidden
+            "There was an error retrieving user account: %s", canvas_exception
         )
-        raise forbidden
-    except exceptions.ResourceDoesNotExist as resource_nonexistant:
-        rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
-        raise resource_nonexistant
+        raise
 
     return user_account
 
@@ -335,6 +325,7 @@ def submit_user_for_change(
             )
 
 
+
 def update_user_notification_preferences(user, desired_preference) -> list[str]:
     """
     For each user gathers the communication channels which they are subscribed to, then
@@ -345,6 +336,7 @@ def update_user_notification_preferences(user, desired_preference) -> list[str]:
     # Variables
     text_output: list[str] = []
     channels: user = user.get_communication_channels()
+      
     for channel in channels:
         # Append output to output list
         text_output.append(f"{'-':^10} {channel}")
@@ -356,22 +348,17 @@ def update_user_notification_preferences(user, desired_preference) -> list[str]:
                 headers=HEADERS,
                 timeout=(TIMEOUT_SECONDS["in"], TIMEOUT_SECONDS["out"]),
             )
-        except exceptions.BadRequest as canvas_bad_request:
-            rootLogger.exception(
-                "Fatal Error connecting to canvas: %s", canvas_bad_request
-            )
-            raise canvas_bad_request
-        except exceptions.InvalidAccessToken as invalid_token:
-            rootLogger.exception("Supplied API key is not valid: %s.", invalid_token)
-            raise invalid_token
-        except exceptions.Unauthorized as unauthorized:
-            rootLogger.error("User is unauthorised: %s", unauthorized)
-        except exceptions.Forbidden as forbidden:
+        except (
+            requests.exceptions.Timeout,  # Request times out
+            requests.exceptions.ProxyError,  # Proxy settings preventing channel aquisition
+            requests.exceptions.HTTPError,  # Http error occured during channel aquisition
+        ) as user_channel_error:
             rootLogger.error(
-                "This user is forbidden from accessing this resource: %s", forbidden
+                "An error occured retrieving notification preferences for:%s's - %s channel.",
+                user.name,
+                channel,
             )
-        except exceptions.ResourceDoesNotExist as resource_nonexistant:
-            rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
+            rootLogger.exception(user_channel_error)
 
         else:
             preferences = response.json()["notification_preferences"]
@@ -424,23 +411,16 @@ def send_to_canvas(user, desired_preference, channel, preference) -> str:
             json=payload,
             timeout=(TIMEOUT_SECONDS["in"], TIMEOUT_SECONDS["out"]),
         )
-    except exceptions.BadRequest as canvas_bad_request:
-        rootLogger.exception("Fatal Error connecting to canvas: %s", canvas_bad_request)
-        raise canvas_bad_request
-    except exceptions.InvalidAccessToken as invalid_token:
-        rootLogger.exception("Supplied API key is not valid: %s.", invalid_token)
-        raise invalid_token
-    except exceptions.Unauthorized as unauthorized:
-        rootLogger.exception("User is unauthorised: %s", unauthorized)
-        raise unauthorized
-    except exceptions.Forbidden as forbidden:
+    except (
+        requests.exceptions.Timeout,  # Request times out
+        requests.exceptions.ProxyError,  # Proxy settings preventing channel aquisition
+        requests.exceptions.ConnectionError,  # Connection is lost
+    ) as update_settings_error:
         rootLogger.exception(
-            "This user is forbidden from accessing this resource: %s", forbidden
+            "An error occured with the requests module preventing settings update"
         )
-        raise forbidden
-    except exceptions.ResourceDoesNotExist as resource_nonexistant:
-        rootLogger.exception("Resource doesn't exist: %s", resource_nonexistant)
-        raise resource_nonexistant
+        rootLogger.exception(update_settings_error)
+        return
 
     return f'{"-":^10}{preference["notification"]:<45}{"=> " + desired_preference:>10} ( {"OK" if response.ok else f"FAILED - {response.status_code}"} )'
 
