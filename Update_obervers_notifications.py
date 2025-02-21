@@ -1,23 +1,27 @@
 import concurrent.futures  # For creating threadpool for multithreading users
 import logging  # Logging tool for writing output to file
 import logging.handlers  # Logging handlers for stdout printing
-import threading
 import os
 import sys  # Operating system endpoints
+import threading
 import time  # Time library for measuring performance
 from itertools import chain  # Iteration tool for iterating complex lists
 
-from dotenv import load_dotenv
 import requests  # Networking library for python
-from canvasapi import account  # Canvas API Library for python
-from canvasapi import Canvas, course, exceptions
+from canvasapi import (
+    Canvas,
+    account,  # Canvas API Library for python
+    course,
+    exceptions,
+)
+from dotenv import load_dotenv
 
 #############################################################################################
 ## Configuration Options
 #############################################################################################
 
 # Load environment variables
-env_file_path = os.path.join(os.getcwd(), '.env')
+env_file_path = os.path.join(os.getcwd(), ".env")
 load_dotenv(dotenv_path=env_file_path)
 
 TERM_IDS = sys.argv[1].split(",")  # Read Term IDs from Command line input
@@ -61,8 +65,10 @@ FILE_LOCK = threading.Lock()  # Locks the log file for writing
 ## Custom Exceptions
 #############################################################################################
 
+
 class BaseNotifierException(Exception):
     """Base exception for the script"""
+
 
 class ForbiddenResourceException(BaseNotifierException):
     """Forbidden to access the provided resource"""
@@ -220,7 +226,7 @@ def get_user_ids(all_courses: list[course.Course], user_type: str) -> list[int]:
     # add these users to a large list of users
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         results = executor.map(threaded_courses, all_courses)
-        
+
     for result in results:
         all_user_ids = result + all_user_ids
 
@@ -273,9 +279,7 @@ def iterate_users(
         + "\n"
     )
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=MAX_THREADS
-    ) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         futures = [
             executor.submit(
                 submit_user_for_change, id, canvas_instance, notification_setting
@@ -301,29 +305,22 @@ def submit_user_for_change(
     user = canvas_instance.get_user(user_id)
     canvas_output: list[str] = []
 
-    canvas_output. append(
-        f"{'-':^10}{user.name} (ID: {user.id})"
-    )
+    canvas_output.append(f"{'-':^10}{user.name} (ID: {user.id})")
     canvas_output.append("-" * 60)
 
     # For this user, update all their notification preferences
     output = update_user_notification_preferences(user, notification_setting)
 
     for text in output:
-        canvas_output.append(
-            text
-        )
+        canvas_output.append(text)
 
     canvas_output.append(
         f"User change time: {time.time() - start_time} seconds\n" + "=" * 60
     )
-    
+
     for output in canvas_output:
         with FILE_LOCK:
-            rootLogger.info(
-                output
-            )
-
+            rootLogger.info(output)
 
 
 def update_user_notification_preferences(user, desired_preference) -> list[str]:
@@ -335,8 +332,8 @@ def update_user_notification_preferences(user, desired_preference) -> list[str]:
 
     # Variables
     text_output: list[str] = []
-    channels: user = user.get_communication_channels()
-      
+    channels = user.get_communication_channels()
+
     for channel in channels:
         # Append output to output list
         text_output.append(f"{'-':^10} {channel}")
@@ -350,11 +347,11 @@ def update_user_notification_preferences(user, desired_preference) -> list[str]:
             )
         except (
             requests.exceptions.Timeout,  # Request times out
-            requests.exceptions.ProxyError,  # Proxy settings preventing channel aquisition
-            requests.exceptions.HTTPError,  # Http error occured during channel aquisition
+            requests.exceptions.ProxyError,  # Proxy settings preventing channel acquisition
+            requests.exceptions.HTTPError,  # Http error occurred during channel acquisition
         ) as user_channel_error:
             rootLogger.error(
-                "An error occured retrieving notification preferences for:%s's - %s channel.",
+                "An error occurred retrieving notification preferences for:%s's - %s channel.",
                 user.name,
                 channel,
             )
@@ -384,16 +381,16 @@ def update_user_notification_preferences(user, desired_preference) -> list[str]:
                     )
                     for preference in preferences
                 ]
-            
+
                 # Run all futures
                 concurrent.futures.wait(submission_futures)
-            
+
             # Retrieve all results from threads
             for future in submission_futures:
                 text_output.append(future.result())
 
             text_output.append("All updates sent.")
-    
+
     # Return all text outputs
     return text_output
 
@@ -478,7 +475,11 @@ def main():
     all_users = remove_duplicates(all_users)
 
     # Iterate over users and update their notification settings
-    iterate_users(canvas_instance, all_users, NOTIFICATION_OPTIONS[int(chosen_notification_option)])
+    iterate_users(
+        canvas_instance,
+        all_users,
+        NOTIFICATION_OPTIONS[int(chosen_notification_option)],
+    )
 
     # Show end of program
     rootLogger.info(
