@@ -96,3 +96,12 @@ This program is regularly run on an old (2015) i5 Processor, though it was devel
 
 ## Command line arguments
 
+In addition to the environment file, the script also consumes command line arguments. Generally this is done as the script may be run with `.env` values multiple times, but the command line allows for rapid changing of values that may need to be separated. 
+
+### TERM IDs
+
+The values which are read from the command line, which are comma separated, are the term ids which need to be updated. 
+
+As the script may be run on a single term, or the script may be run on multiple terms from another program -- this data is entered through the command line. 
+
+Term IDs can be found in the canvas dashboards and through the URL's which are used to access data within that term. More info can be found [Here](https://community.canvaslms.com/t5/Admin-Guide/How-do-I-use-the-Terms-page-in-an-account/ta-p/159)
