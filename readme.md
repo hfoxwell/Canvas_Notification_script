@@ -105,3 +105,9 @@ The values which are read from the command line, which are comma separated, are 
 As the script may be run on a single term, or the script may be run on multiple terms from another program -- this data is entered through the command line. 
 
 Term IDs can be found in the canvas dashboards and through the URL's which are used to access data within that term. More info can be found [Here](https://community.canvaslms.com/t5/Admin-Guide/How-do-I-use-the-Terms-page-in-an-account/ta-p/159)
+
+### Example
+
+``` 
+$: python3 Update_observers_notifications.py 4,144
+```
